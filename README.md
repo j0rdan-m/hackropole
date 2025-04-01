@@ -1,6 +1,4 @@
-# sqli-detector
-
-# 🐍 SQLi Final Tester – Blind Injection Multi-SGBD
+# sqli-detector – Blind Injection Multi-SGBD
 
 Script Python complet pour tester et exploiter une injection SQL de type blind sur des APIs REST JSON.  
 Supporte la détection automatique du SGBD, l'extraction du schéma, et la récupération ciblée de données (ex: flags).
