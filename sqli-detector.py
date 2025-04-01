@@ -154,7 +154,9 @@ def main():
         if args.extract_schema:
             schema = tester.extract_schema()
             for t, cols in schema.items():
-                print(f"[+] Table : {t} => Colonnes : {cols}")
+                print(f"\n[+] 📦 Table : {t}")
+                for col in cols:
+                    print(f"    └── 📌 Colonne : {col}")
 
         if args.wanted_key:
             tester.extract_data()
